@@ -1,44 +1,46 @@
-use std::{
-    env, fs,
-    io::{BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
-};
-
+use std::env;
 use dotenv::dotenv;
 
-fn main() {
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+#[tokio::main]
+async fn main() {
     dotenv().ok().expect("Unable to init dotenv");
 
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     println!("Starting on port: {port}");
 
-    let listener =
-        TcpListener::bind(format!("127.0.0.1:{port}")).expect("Unable to initialise TcpListener");
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("Unable to start TcpListener");
 
-    for stream in listener.incoming() {
-        let stream = stream.unwrap();
-        println!("Connection Established");
-
-        handle_connection(stream);
+    loop {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio::spawn(handle_connection(stream));
     }
 }
 
-fn handle_connection(mut stream: TcpStream) {
-    let buf_reader = BufReader::new(&stream);
+async fn handle_connection(mut stream: tokio::net::TcpStream) {
+    let buf_reader = BufReader::new(&mut stream);
+    let mut lines = buf_reader.lines();
 
-    let http_request: Vec<_> = buf_reader
-        .lines()
-        .map(|result| result.unwrap())
-        .take_while(|line| !line.is_empty())
-        .collect();
+    let mut http_request = Vec::new();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.is_empty() {
+            break
+        };
+
+        http_request.push(line);
+    }
 
     let status_code = "HTTP/1.1 200 OK";
 
-    let body = fs::read_to_string("src/hello.html").unwrap();
+    let body = tokio::fs::read_to_string("src/hello.html").await.unwrap();
     let length = body.len();
 
-    let response = format!("{status_code}\r\nContent-Length{length}\r\n\r\n{body}");
-    stream.write_all(response.as_bytes()).unwrap();
+    let response = format!("{status_code}\r\nContent-Length: {length}\r\n\r\n{body}");
+    stream.write_all(response.as_bytes()).await.unwrap();
 
     println!("Request: {http_request:#?}");
 }
