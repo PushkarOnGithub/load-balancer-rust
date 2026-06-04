@@ -4,7 +4,11 @@ use std::{
     net::{TcpListener, TcpStream},
 };
 
+use dotenv::dotenv;
+
 fn main() {
+    dotenv().ok().expect("Unable to init dotenv");
+
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     println!("Starting on port: {port}");
 
