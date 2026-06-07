@@ -1,7 +1,5 @@
-use std::env;
+use std::{env};
 use dotenv::dotenv;
-
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::main]
 async fn main() {
@@ -21,26 +19,16 @@ async fn main() {
 }
 
 async fn handle_connection(mut stream: tokio::net::TcpStream) {
-    let buf_reader = BufReader::new(&mut stream);
-    let mut lines = buf_reader.lines();
+    // Split the bidirectional stream into a read half and a write half
+    let (mut reader, mut writer) = stream.split();
 
-    let mut http_request = Vec::new();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        if line.is_empty() {
-            break
-        };
-
-        http_request.push(line);
+    // Automatically copy everything from the reader back into the writer
+    match tokio::io::copy(&mut reader, &mut writer).await {
+        Ok(bytes_copied) => {
+            println!("Connection closed gracefully. Echoed {bytes_copied} bytes.");
+        }
+        Err(e) => {
+            eprintln!("Connection ended with an error: {e}");
+        }
     }
-
-    let status_code = "HTTP/1.1 200 OK";
-
-    let body = tokio::fs::read_to_string("src/hello.html").await.unwrap();
-    let length = body.len();
-
-    let response = format!("{status_code}\r\nContent-Length: {length}\r\n\r\n{body}");
-    stream.write_all(response.as_bytes()).await.unwrap();
-
-    println!("Request: {http_request:#?}");
 }
