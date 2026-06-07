@@ -1,14 +1,13 @@
 use dotenv::dotenv;
 use std::{
     env,
-    ops::Add,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 struct RouterState {
-    backends: Vec<String>,
-    current_index: Mutex<usize>,
+    backends: Arc<RwLock<Vec<String>>>,
+    current_index: Mutex<Option<usize>>,
 }
 
 #[tokio::main]
@@ -18,22 +17,28 @@ async fn main() {
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     println!("Starting on port: {port}");
 
-    let backends: Vec<String> = env::var("BACKENDS")
+    let all_backends: Vec<String> = env::var("BACKENDS")
         .expect("Unable to read BACKENDS from env")
         .split(",")
         .map(|x| String::from(x))
         .collect();
 
+    let backends = Arc::new(RwLock::new(all_backends.clone()));
+
     println!("Backends: {:?}", backends);
 
     let router = Arc::new(RouterState {
         backends,
-        current_index: Mutex::new(0),
+        current_index: Mutex::new(Some(0)),
     });
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .expect("Unable to start TcpListener");
+
+    // Spawn ONE health check task before accepting connections
+    let router_clone = Arc::clone(&router);
+    tokio::spawn(async move { healthcheck(all_backends, router_clone).await });
 
     loop {
         let router_clone = Arc::clone(&router);
@@ -45,12 +50,29 @@ async fn main() {
 
 async fn handle_connection(mut client_stream: tokio::net::TcpStream, router: Arc<RouterState>) {
     let backend_addr = {
-        let mut index = router
-            .current_index
-            .try_lock()
-            .expect("Unable to lock mutex");
-        let backend = router.backends.get(*index).unwrap().clone();
-        *index = index.add(1) % router.backends.len();
+        let mut index = router.current_index.lock().expect("Unable to lock mutex");
+
+        let backends_guard = router.backends.read().unwrap();
+
+        if backends_guard.is_empty() {
+            eprintln!("503 Service Unavailable: No backends online to serve request.");
+            return; // This gracefully ends the task and disconnects the client
+        }
+
+        let idx = match *index {
+            Some(i) => i,
+            None => {
+                *index = Some(0);
+                0
+            }
+        };
+
+        let backend = backends_guard
+            .get(idx)
+            .expect("No backend available to serve request")
+            .clone();
+
+        *index = Some((idx + 1) % backends_guard.len());
         backend
     };
 
@@ -116,4 +138,40 @@ async fn handle_connection(mut client_stream: tokio::net::TcpStream, router: Arc
             }
         }
     }
+}
+
+async fn healthcheck(all_backends: Vec<String>, router: Arc<RouterState>) {
+    // keep polling using loop
+    loop {
+        // loop over the available backends and update the list to available ones
+        let mut active_backends = vec![];
+
+        for backend_addr in all_backends.clone() {
+            if health(&backend_addr).await {
+                active_backends.push(backend_addr);
+            }
+        }
+
+        {
+            let mut idx = router.current_index.lock().expect("Unable to lock Mutex");
+            let mut guard = router
+                .backends
+                .write()
+                .expect("Unable to get lock on RwLock");
+
+            if active_backends.len() == 0 {
+                *idx = None;
+            } else {
+                *idx = Some(0);
+            }
+            println!("Updated backends to: {:?}", active_backends);
+            *guard = active_backends;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    }
+}
+
+async fn health(backend_addr: &str) -> bool {
+    tokio::net::TcpStream::connect(backend_addr).await.is_ok()
 }
