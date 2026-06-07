@@ -1,6 +1,11 @@
 use dotenv::dotenv;
-use std::env;
+use std::{env, ops::Add, sync::Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+struct RouterState {
+    backends: Vec<String>,
+    current_index: Mutex<usize>,
+}
 
 #[tokio::main]
 async fn main() {
@@ -9,19 +14,38 @@ async fn main() {
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     println!("Starting on port: {port}");
 
+    let backends: Vec<String> = env::var("BACKENDS")
+        .expect("Unable to read BACKENDS from env")
+        .split(",")
+        .map(|x| String::from(x))
+        .collect();
+
+    println!("Backends: {:?}", backends);
+
+    let router = RouterState {
+        backends,
+        current_index: Mutex::new(0)
+    };
+
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .expect("Unable to start TcpListener");
 
     loop {
+        let backend = {
+            let mut index = router.current_index.try_lock().expect("Unable to lock mutex");
+            let backend = router.backends.get(*index).unwrap().clone();
+            *index = index.add(1) % router.backends.len();
+            backend
+        };
+
         let (stream, _) = listener.accept().await.unwrap();
-        tokio::spawn(handle_connection(stream));
+        tokio::spawn(handle_connection(stream, backend));
     }
 }
 
-async fn handle_connection(mut client_stream: tokio::net::TcpStream) {
-    let backend_addr = "127.0.0.1:4000";
-
+async fn handle_connection(mut client_stream: tokio::net::TcpStream, backend_addr: String) {
+    println!("Using {} backend", backend_addr);
     let mut backend_stream = match tokio::net::TcpStream::connect(backend_addr).await {
         Ok(stream) => stream,
         Err(e) => {
@@ -59,7 +83,7 @@ async fn handle_connection(mut client_stream: tokio::net::TcpStream) {
                     }
                 }
             }
-            
+
             // backend sent some data
             result = backend_read.read(&mut backend_buf) => {
                 match result {
