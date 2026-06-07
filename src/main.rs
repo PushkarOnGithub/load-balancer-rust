@@ -42,29 +42,43 @@ async fn handle_connection(mut client_stream: tokio::net::TcpStream) {
             // client sent some data
             result = client_read.read(&mut client_buf) => {
                 match result {
-                    Ok(0) => {},
+                    Ok(0) => {
+                        println!("Client disconnected");
+                        break; // EOF reached, exit the loop
+                    },
                     Ok(n) => {
                         println!("Client sent {} bytes -> echoing", n);
                         if let Err(e) = backend_write.write_all(&client_buf[..n]).await {
                             eprintln!("Failed to write to backend error: {}", e);
+                            break;
                         };
                     },
-                    Err(e) => eprintln!("Error while reading client stream error: {}", e)
+                    Err(e) => {
+                        eprintln!("Error while reading client stream error: {}", e);
+                        break;
+                    }
                 }
             }
             
             // backend sent some data
             result = backend_read.read(&mut backend_buf) => {
                 match result {
-                    Ok(0) => {},
+                    Ok(0) => {
+                        println!("Backend disconnected");
+                        break; // EOF reached, exit the loop
+                    },
 
                     Ok(n) => {
                         println!("Backend sent {} bytes -> echoing", n);
                         if let Err(e) = client_write.write_all(&backend_buf[..n]).await {
                             eprintln!("Failed to write to backend, error: {}", e);
+                            break;
                         };
                     },
-                    Err(e) => eprintln!("Error while reading backend stream error: {}", e)
+                    Err(e) => {
+                        eprintln!("Error while reading backend stream error: {}", e);
+                        break;
+                    }
                 }
             }
         }
