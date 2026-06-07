@@ -1,5 +1,9 @@
 use dotenv::dotenv;
-use std::{env, ops::Add, sync::Mutex};
+use std::{
+    env,
+    ops::Add,
+    sync::{Arc, Mutex},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 struct RouterState {
@@ -22,29 +26,34 @@ async fn main() {
 
     println!("Backends: {:?}", backends);
 
-    let router = RouterState {
+    let router = Arc::new(RouterState {
         backends,
-        current_index: Mutex::new(0)
-    };
+        current_index: Mutex::new(0),
+    });
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .expect("Unable to start TcpListener");
 
     loop {
-        let backend = {
-            let mut index = router.current_index.try_lock().expect("Unable to lock mutex");
-            let backend = router.backends.get(*index).unwrap().clone();
-            *index = index.add(1) % router.backends.len();
-            backend
-        };
+        let router_clone = Arc::clone(&router);
 
         let (stream, _) = listener.accept().await.unwrap();
-        tokio::spawn(handle_connection(stream, backend));
+        tokio::spawn(async move { handle_connection(stream, router_clone).await });
     }
 }
 
-async fn handle_connection(mut client_stream: tokio::net::TcpStream, backend_addr: String) {
+async fn handle_connection(mut client_stream: tokio::net::TcpStream, router: Arc<RouterState>) {
+    let backend_addr = {
+        let mut index = router
+            .current_index
+            .try_lock()
+            .expect("Unable to lock mutex");
+        let backend = router.backends.get(*index).unwrap().clone();
+        *index = index.add(1) % router.backends.len();
+        backend
+    };
+
     println!("Using {} backend", backend_addr);
     let mut backend_stream = match tokio::net::TcpStream::connect(backend_addr).await {
         Ok(stream) => stream,
